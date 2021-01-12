@@ -1177,6 +1177,37 @@ func TestAccAWSEMRCluster_s3Logging(t *testing.T) {
 	})
 }
 
+func TestAccAWSEMRCluster_s3LoggingEncrypted(t *testing.T) {
+	var cluster emr.Cluster
+
+	resourceName := "aws_emr_cluster.tf-test-cluster"
+	rName := acctest.RandomWithPrefix("tf-acc-test")
+	resource.ParallelTest(t, resource.TestCase{
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: testAccCheckAWSEmrDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccAWSEmrClusterConfigS3LoggingEncrypted(rName),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckAWSEmrClusterExists(resourceName, &cluster),
+					resource.TestCheckResourceAttr(resourceName, "log_encryption_kms_key_id", "bucketName"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+				ImportStateVerifyIgnore: []string{
+					"cluster_state", // Ignore RUNNING versus WAITING changes
+					"configurations",
+					"keep_job_flow_alive_when_no_steps",
+				},
+			},
+		},
+	})
+}
+
 func TestAccAWSEMRCluster_tags(t *testing.T) {
 	var cluster emr.Cluster
 
@@ -2983,6 +3014,72 @@ resource "aws_emr_cluster" "tf-test-cluster" {
 }
 
 data "aws_caller_identity" "current" {}
+`, r),
+	)
+}
+
+func testAccAWSEmrClusterConfigS3LoggingEncrypted(r string) string {
+	return testAccAWSEmrComposeConfig(false,
+		testAccAWSEmrClusterConfigCurrentPartition(),
+		fmt.Sprintf(`
+resource "aws_s3_bucket" "test" {
+  bucket        = "%[1]s"
+  force_destroy = true
+}
+
+resource "aws_emr_cluster" "tf-test-cluster" {
+  name          = "%[1]s"
+  release_label = "emr-4.6.0"
+  applications  = ["Spark"]
+
+  termination_protection            = false
+  keep_job_flow_alive_when_no_steps = true
+
+  master_instance_group {
+    instance_type = "c4.large"
+  }
+
+  core_instance_group {
+    instance_count = 1
+    instance_type  = "c4.large"
+  }
+
+  log_uri                   = "s3://${aws_s3_bucket.test.bucket}/"
+  log_encryption_kms_key_id = "${aws_kms_key.foo.arn}"
+
+  ec2_attributes {
+    instance_profile                  = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:instance-profile/EMR_EC2_DefaultRole"
+    emr_managed_master_security_group = aws_security_group.test.id
+    emr_managed_slave_security_group  = aws_security_group.test.id
+    subnet_id                         = aws_subnet.test.id
+  }
+
+  service_role = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/EMR_DefaultRole"
+}
+
+data "aws_caller_identity" "current" {}
+
+resource "aws_kms_key" "foo" {
+  description             = "Terraform %[1]s"
+  deletion_window_in_days = 7
+
+  policy = <<POLICY
+{
+  "Version": "2012-10-17",
+  "Id": "kms-tf-1",
+  "Statement": [
+    {
+      "Sid": "Enable IAM User Permissions",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "*"
+      },
+      "Action": "kms:*",
+      "Resource": "*"
+    }
+  ]
+}
+POLICY
 `, r),
 	)
 }
